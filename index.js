@@ -37,19 +37,26 @@ const decryptSecret = (name) => {
 // returns a url
 const parseBody = body => body.match(/responsibot.*(https?:\/\/(\w+:{0,1}\w*@)?(\S+)(:[0-9]+)?(\/|\/([\w#!:.?+=&%@!\-\/]))?)/)[1];
 
-const postToGitHub = (screenshotUrl, issueUrl, pullId, commentId) => request({
-  method: 'POST',
-  uri: `${issueUrl}/comments`,
-  body: {
-    body: `![](${screenshotUrl})`,
-    in_reply_to: commentId,
-  },
-  headers: {
-    'User-Agent': 'responsibot',
-    Authorization: 'token 598de899f47a0a5c0f1dd96524d37b862d9dc53a',
-  },
-  json: true,
-});
+const postToGitHub = (screenshotUrl, issueUrl, pullId, commentId) => {
+  let githubToken = Promise.resolve(process.env.GITHUB_TOKEN);
+
+  if (!process.env.LOCAL) {
+    githubToken = decryptSecret(process.env.GITHUB_TOKEN);
+  }
+
+  return githubToken.then(token => request({
+    method: 'POST',
+    uri: `${issueUrl}/comments`,
+    body: {
+      body: `![](${screenshotUrl})`,
+      in_reply_to: commentId,
+    },
+    headers: {
+      'User-Agent': 'responsibot',
+      Authorization: `token ${token}`,
+    },
+    json: true,
+  }));
 
 const responsibot = (event) => {
   let decryptedSecrets = Promise.resolve([
@@ -96,7 +103,6 @@ const responsibot = (event) => {
         .screenshot()
         .then(base64 => resolve(s3put(base64)))
         .end();
-      // resolve('https://s3.amazonaws.com/responsibot/1492183291256.png')
     }).then(screenshotUrl => postToGitHub(screenshotUrl, event.comment.issue_url, event.comment.id));
   });
 };
