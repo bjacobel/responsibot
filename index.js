@@ -1,5 +1,6 @@
 const webdriverio = require('webdriverio');
 const AWS = require('aws-sdk');
+const request = require('request-promise');
 
 const s3put = (b64) => {
   const filename = `${Date.now()}.png`;
@@ -17,29 +18,53 @@ const s3put = (b64) => {
   .then(() => `https://responsibot.s3.amazonaws.com/${filename}`);
 };
 
-const responsibot = (url) => {
-  let decryptedSecrets = Promise.resolve({
-    SAUCE_USERNAME: process.env.SAUCE_USERNAME,
-    SAUCE_ACCESS_KEY: process.env.SAUCE_ACCESS_KEY,
-  });
-
+const decryptSecret = (name) => {
   const kms = new AWS.KMS();
 
+  return new Promise((resolve, reject) => {
+    kms.decrypt({
+      CiphertextBlob: new Buffer(name, 'base64'),
+    }, (err, data) => {
+      if (err) {
+        reject(err);
+      } else {
+        resolve(data.Plaintext.toString('ascii'));
+      }
+    });
+  });
+};
+
+// returns a url
+const parseBody = body => body.match(/responsibot.*(https?:\/\/(\w+:{0,1}\w*@)?(\S+)(:[0-9]+)?(\/|\/([\w#!:.?+=&%@!\-\/]))?)/)[1];
+
+const postToGitHub = (screenshotUrl, issueUrl, pullId, commentId) => request({
+  method: 'POST',
+  uri: `${issueUrl}/comments`,
+  body: {
+    body: `![](${screenshotUrl})`,
+    in_reply_to: commentId,
+  },
+  headers: {
+    'User-Agent': 'responsibot',
+    Authorization: 'token 598de899f47a0a5c0f1dd96524d37b862d9dc53a',
+  },
+  json: true,
+});
+
+const responsibot = (event) => {
+  let decryptedSecrets = Promise.resolve([
+    process.env.SAUCE_USERNAME,
+    process.env.SAUCE_ACCESS_KEY,
+  ]);
+
   if (!process.env.LOCAL) {
-    decryptedSecrets = kms.decrypt({
-      CiphertextBlob: new Buffer(decryptedSecrets.SAUCE_USERNAME, 'base64'),
-    }, (err, data) => data.Plaintext.toString('ascii'))
-      .promise()
-      .then(username => kms.decrypt({
-        CiphertextBlob: new Buffer(decryptedSecrets.SAUCE_ACCESS_KEY, 'base64'),
-      }, (err, data) => ({
-        SAUCE_USERNAME: username,
-        SAUCE_ACCESS_KEY: data.Plaintext.toString('ascii'),
-      })))
-      .promise();
+    decryptedSecrets = Promise.all([
+      decryptSecret(process.env.SAUCE_USERNAME),
+      decryptSecret(process.env.SAUCE_ACCESS_KEY),
+    ]);
   }
 
-  return decryptedSecrets.then(({ SAUCE_USERNAME, SAUCE_ACCESS_KEY }) => {
+  return decryptedSecrets.then(([SAUCE_USERNAME, SAUCE_ACCESS_KEY]) => {
     const wdconf = {
       host: 'ondemand.saucelabs.com',
       port: 80,
@@ -59,21 +84,25 @@ const responsibot = (url) => {
       desiredCapabilities: browser,
     });
 
+    const url = parseBody(event.comment.body);
+
     // navigate to url
     const client = webdriverio.remote(wdconf);
 
-    return new Promise(resolve => client
-      .init()
-      .url(url)
-      .screenshot()
-      .then(base64 => resolve(s3put(base64)))
-      .end()  // eslint-disable-line comma-dangle
-    );
+    return new Promise((resolve) => {
+      return client
+        .init()
+        .url(url)
+        .screenshot()
+        .then(base64 => resolve(s3put(base64)))
+        .end();
+      // resolve('https://s3.amazonaws.com/responsibot/1492183291256.png')
+    }).then(screenshotUrl => postToGitHub(screenshotUrl, event.comment.issue_url, event.comment.id));
   });
 };
 
 module.exports = {
-  handler: (event, context, callback) => responsibot(event.url)
+  handler: (event, context, callback) => responsibot(event)
     .then((screenshot) => {
       callback(null, screenshot);
     })
