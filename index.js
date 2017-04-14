@@ -18,43 +18,64 @@ const s3put = (b64) => {
 };
 
 const responsibot = (url) => {
-  const wdconf = {
-    host: 'ondemand.saucelabs.com',
-    port: 80,
-    user: process.env.SAUCE_USERNAME,
-    key: process.env.SAUCE_ACCESS_KEY,
-    logLevel: 'verbose',
-  };
-
-  const browser = {
-    browserName: 'safari',
-    platformVersion: '10.2',
-    platformName: 'iOS',
-    deviceName: 'iPhone 7 Plus Simulator',
-  };
-
-  Object.assign(wdconf, {
-    desiredCapabilities: browser,
+  let decryptedSecrets = Promise.resolve({
+    SAUCE_USERNAME: process.env.SAUCE_USERNAME,
+    SAUCE_ACCESS_KEY: process.env.SAUCE_ACCESS_KEY,
   });
 
-  // navigate to url
-  const client = webdriverio.remote(wdconf);
+  const kms = new AWS.KMS();
 
-  return new Promise(resolve => client
-    .init()
-    .url(url)
-    .screenshot()
-    .then(base64 => resolve(s3put(base64)))
-    .end()  // eslint-disable-line comma-dangle
-  );
+  if (!process.env.LOCAL) {
+    decryptedSecrets = kms.decrypt({
+      CiphertextBlob: new Buffer(decryptedSecrets.SAUCE_USERNAME, 'base64'),
+    }, (err, data) => data.Plaintext.toString('ascii'))
+      .promise()
+      .then(username => kms.decrypt({
+        CiphertextBlob: new Buffer(decryptedSecrets.SAUCE_ACCESS_KEY, 'base64'),
+      }, (err, data) => ({
+        SAUCE_USERNAME: username,
+        SAUCE_ACCESS_KEY: data.Plaintext.toString('ascii'),
+      })))
+      .promise();
+  }
+
+  return decryptedSecrets.then(({ SAUCE_USERNAME, SAUCE_ACCESS_KEY }) => {
+    const wdconf = {
+      host: 'ondemand.saucelabs.com',
+      port: 80,
+      user: SAUCE_USERNAME,
+      key: SAUCE_ACCESS_KEY,
+      logLevel: 'verbose',
+    };
+
+    const browser = {
+      browserName: 'Browser',
+      platformVersion: '4.4',
+      platformName: 'Android',
+      deviceName: 'Samsung Galaxy Nexus Emulator',
+    };
+
+    Object.assign(wdconf, {
+      desiredCapabilities: browser,
+    });
+
+    // navigate to url
+    const client = webdriverio.remote(wdconf);
+
+    return new Promise(resolve => client
+      .init()
+      .url(url)
+      .screenshot()
+      .then(base64 => resolve(s3put(base64)))
+      .end()  // eslint-disable-line comma-dangle
+    );
+  });
 };
 
 module.exports = {
-  handler: (event, context, callback) => responsibot('https://courses.edx.org'),
+  handler: (event, context, callback) => responsibot(event.url)
+    .then((screenshot) => {
+      callback(null, screenshot);
+    })
+    .catch(err => callback(err)),
 };
-
-// TEST CODE
-
-responsibot('https://courses.edx.org').then((screenshotUrl) => {
-  return console.log(screenshotUrl);
-});
